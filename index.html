@@ -93,6 +93,17 @@
       <label class="check"><input id="fFps" type="checkbox"><span>FPS を表示</span></label>
     </section>
 
+    <section class="card">
+      <h2>診断・復旧</h2>
+      <p class="hint">液晶は 0.5 秒ごとに設定を再送して、接触不良などで落ちても自動で復帰します。それでも映らないときは「再初期化」を押してください(本体の BOOT ボタン短押しでも同じ)。</p>
+      <div class="buttons">
+        <button type="button" id="reinitBtn">液晶を再初期化</button>
+        <button type="button" id="faultBtn">自動復旧テスト</button>
+        <button type="button" id="syncBtn">今すぐ時刻合わせ</button>
+      </div>
+      <p id="diagInfo" class="hint"></p>
+    </section>
+
     <form id="form" autocomplete="off">
       <section class="card">
         <h2>バックライト・液晶・メッセージ</h2>

@@ -17,7 +17,15 @@ const UUID = {
 const PROTO_VERSION = 2;
 const MESSAGE_MAX_LEN = 21;
 const FLAG = { CLOCK: 1, FPS: 2, DEPTH: 4, NAME: 8 };
-const ACTION = { DROP: 1, RESET: 2, NEXT: 3 };
+const ACTION = { DROP: 1, RESET: 2, NEXT: 3, LCD_REINIT: 4, LCD_FAULT_TEST: 5, TIME_SYNC: 6 };
+
+// esp_reset_reason_t values reported by the firmware (Status bytes 4..5).
+const RESET_REASONS = {
+  0: ["不明(USB 経由のリセットなど)", false], 1: ["電源投入", false], 2: ["外部リセット", false], 3: ["ソフトウェアリセット", false],
+  4: ["パニック(プログラムのクラッシュ)", true], 5: ["割り込みウォッチドッグ", true],
+  6: ["タスクウォッチドッグ", true], 7: ["ウォッチドッグ", true], 8: ["ディープスリープ復帰", false],
+  9: ["ブラウンアウト(電源電圧の低下)", true], 10: ["SDIO", false], 11: ["USB", false],
+};
 
 // ---------------------------------------------------------------------------
 // Scene catalogue. Parameter ranges mirror the mapping done in the firmware
@@ -111,6 +119,7 @@ const el = {
   sceneGrid: $("sceneGrid"), cycle: $("cycle"), nextBtn: $("nextBtn"),
   paramTitle: $("paramTitle"), sceneDesc: $("sceneDesc"), params: $("params"),
   dropBtn: $("dropBtn"), resetBtn: $("resetBtn"), defaultsBtn: $("defaultsBtn"),
+  reinitBtn: $("reinitBtn"), faultBtn: $("faultBtn"), syncBtn: $("syncBtn"), diagInfo: $("diagInfo"),
   speed: $("speed"), speedOut: $("speedOut"),
   fClock: $("fClock"), fDepth: $("fDepth"), fName: $("fName"), fFps: $("fFps"),
   form: $("form"), applyBtn: $("applyBtn"),
@@ -126,6 +135,7 @@ const state = {
   selected: 1,
   active: -1,
   fps: 0,
+  diag: null, // { reason, boots } from the Status characteristic
   cycle: 20,
   speed: 100,
   flags: 13,
@@ -306,6 +316,19 @@ function renderGlobals() {
   el.fFps.checked = !!(state.flags & FLAG.FPS);
 }
 
+function renderDiag() {
+  const d = state.diag;
+  if (!d) { el.diagInfo.textContent = ""; return; }
+  const [name, bad] = RESET_REASONS[d.reason] || ["不明(" + d.reason + ")", false];
+  el.diagInfo.textContent = "前回の起動理由: " + name + " / 起動 " + d.boots + " 回目" +
+    (bad ? " — 電源やクラッシュが原因で再起動しています。USB ケーブルや 3.3V/GND の接触、電源を確認してください。"
+         : " — 起動回数が勝手に増えていくなら本体が再起動しています(電源側の接触)。増えないのに液晶だけ消えるなら、液晶側の配線(CS/DC/RST/SCLK/MOSI)の接触が原因です。");
+}
+
+function readDiag(dv) {
+  if (dv.byteLength >= 6) { state.diag = { reason: dv.getUint8(4), boots: dv.getUint8(5) }; renderDiag(); }
+}
+
 function renderLive() {
   const name = state.active >= 0 ? SCENES[state.active].name : "—";
   el.live.textContent = name + " · " + (state.fps || "—") + " fps";
@@ -399,6 +422,7 @@ function onStatus(ev) {
   if (dv.getUint8(0) !== PROTO_VERSION) toast("ファームウェアの通信バージョンが異なります。", "err");
   state.active = dv.getUint8(1);
   state.fps = dv.getUint8(2);
+  readDiag(dv);
   renderLive();
   renderScenes();
 }
@@ -439,6 +463,7 @@ async function readAll() {
   if (st.getUint8(0) !== PROTO_VERSION) toast("ファームウェアの通信バージョンが異なります。", "err");
   state.active = st.getUint8(1);
   state.fps = st.getUint8(2);
+  readDiag(st);
 }
 
 async function connectGatt() {
@@ -531,6 +556,12 @@ function bindUi() {
   el.nextBtn.addEventListener("click", () => sendAction(ACTION.NEXT));
   el.dropBtn.addEventListener("click", () => sendAction(ACTION.DROP));
   el.resetBtn.addEventListener("click", () => sendAction(ACTION.RESET));
+  el.reinitBtn.addEventListener("click", () => { sendAction(ACTION.LCD_REINIT); toast("液晶を再初期化しました。", "ok"); });
+  el.faultBtn.addEventListener("click", () => {
+    sendAction(ACTION.LCD_FAULT_TEST);
+    toast("液晶を一瞬消しました。0.5 秒以内に自動で戻れば正常です。", "");
+  });
+  el.syncBtn.addEventListener("click", () => { sendAction(ACTION.TIME_SYNC); toast("時刻合わせを開始しました(数秒かかります)。", "ok"); });
   el.defaultsBtn.addEventListener("click", () => {
     state.params[state.selected] = SCENES[state.selected].params.map((p) => p.def);
     renderParams();
