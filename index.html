@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#14181f">
+<title>ESPmono Clock</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <header>
+    <h1>ESPmono Clock</h1>
+    <p class="sub">Bluetooth で時計の表示を操作</p>
+  </header>
+
+  <div id="unsupported" class="notice warn" hidden>
+    このブラウザは Web Bluetooth に対応していません。
+    <strong>Android の Chrome</strong>(または PC の Chrome / Edge)で開いてください。
+    iPhone では <strong>Bluefy</strong> などの対応ブラウザが必要です。
+  </div>
+
+  <section class="card" id="connectCard">
+    <div class="row">
+      <div>
+        <div class="label">接続状態</div>
+        <div id="status" class="status off">未接続</div>
+      </div>
+      <button id="connectBtn" type="button" class="primary">接続</button>
+    </div>
+  </section>
+
+  <form id="form" autocomplete="off">
+    <fieldset id="fields" disabled>
+      <section class="card">
+        <h2>バックライト</h2>
+        <label class="slider">
+          <span>昼の明るさ <output id="dayOut">100</output>%</span>
+          <input id="day" type="range" min="0" max="100" value="100">
+        </label>
+        <label class="slider">
+          <span>夜の明るさ <output id="nightOut">5</output>%</span>
+          <input id="night" type="range" min="0" max="100" value="5">
+        </label>
+        <div class="pair">
+          <label>夜の開始
+            <select id="nstart"></select>
+          </label>
+          <label>夜の終了
+            <select id="nend"></select>
+          </label>
+        </div>
+        <p class="hint" id="nightHint"></p>
+      </section>
+
+      <section class="card">
+        <h2>LCD</h2>
+        <label class="slider">
+          <span>コントラスト <output id="contrastOut">128</output></span>
+          <input id="contrast" type="range" min="0" max="255" value="128">
+        </label>
+        <label class="check">
+          <input id="flip" type="checkbox">
+          <span>表示を上下左右反転(flip)</span>
+        </label>
+      </section>
+
+      <section class="card">
+        <h2>メッセージ</h2>
+        <label>
+          <span class="visually-hidden">メッセージ</span>
+          <input id="message" type="text" maxlength="21" placeholder="例: Good luck!" inputmode="text" autocapitalize="off" spellcheck="false">
+        </label>
+        <p class="hint">半角英数字と記号のみ・21 文字まで。設定すると目標日時の行と 5 秒ごとに交互表示します。空にすると非表示。</p>
+        <p class="hint" id="msgCount">0 / 21</p>
+      </section>
+
+      <button id="applyBtn" type="submit" class="primary wide">時計に反映</button>
+    </fieldset>
+  </form>
+
+  <p id="msg" class="toast" role="status" aria-live="polite"></p>
+  <footer>設定は時計の本体に保存され、再起動後も残ります。</footer>
+</main>
+<script src="app.js"></script>
+</body>
+</html>
