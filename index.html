@@ -94,6 +94,30 @@
     </section>
 
     <section class="card">
+      <h2>ニュース</h2>
+      <p class="hint">シーン「News」に表示する見出しの配信元です。取得のたびに Wi-Fi を数秒だけ入れて、すぐ切ります(電源の揺れ対策)。</p>
+      <label>配信元
+        <select id="newsSource"></select>
+      </label>
+      <label id="newsUrlRow" hidden>RSS の URL
+        <input id="newsUrl" type="url" maxlength="119" placeholder="https://example.com/feed.xml" autocapitalize="off" spellcheck="false">
+      </label>
+      <label>更新間隔
+        <select id="newsInterval">
+          <option value="15">15 分ごと</option>
+          <option value="30">30 分ごと</option>
+          <option value="60">60 分ごと</option>
+          <option value="0">自動更新しない</option>
+        </select>
+      </label>
+      <div class="buttons">
+        <button type="button" id="newsApply" class="primary">配信元を反映</button>
+        <button type="button" id="newsRefresh">今すぐ更新</button>
+      </div>
+      <p id="newsInfo" class="hint"></p>
+    </section>
+
+    <section class="card">
       <h2>診断・復旧</h2>
       <p class="hint">液晶は 0.5 秒ごとに設定を再送して、接触不良などで落ちても自動で復帰します。それでも映らないときは「再初期化」を押してください(本体の BOOT ボタン短押しでも同じ)。</p>
       <div class="buttons">

@@ -1,7 +1,7 @@
 "use strict";
 
 // Minimal app-shell cache so the page opens offline (BLE itself needs no network).
-const CACHE = "espmono-3dlab-v3";
+const CACHE = "espmono-3dlab-v4";
 const SHELL = [
   "./", "index.html", "app.js", "style.css",
   "manifest.webmanifest", "icon.svg", "icon-192.png", "icon-512.png",

@@ -13,11 +13,22 @@ const UUID = {
   action: "ae6b0006-d452-4478-9a9f-6030f75771a7",    // write [code]
   status: "ae6b0007-d452-4478-9a9f-6030f75771a7",    // notify [proto, active_scene, fps, flags]
   mirror: "ae6b0008-d452-4478-9a9f-6030f75771a7",    // notify: LCD frames (delta + RLE, chunked)
+  newsCfg: "ae6b0009-d452-4478-9a9f-6030f75771a7",   // R/W [source, interval_min]
+  newsUrl: "ae6b000a-d452-4478-9a9f-6030f75771a7",   // R/W custom RSS URL (ASCII)
+  newsStatus: "ae6b000b-d452-4478-9a9f-6030f75771a7", // notify [state, count, age_min u16, error u16]
 };
 const PROTO_VERSION = 2;
 const MESSAGE_MAX_LEN = 21;
 const FLAG = { CLOCK: 1, FPS: 2, DEPTH: 4, NAME: 8 };
-const ACTION = { DROP: 1, RESET: 2, NEXT: 3, LCD_REINIT: 4, LCD_FAULT_TEST: 5, TIME_SYNC: 6 };
+const ACTION = { DROP: 1, RESET: 2, NEXT: 3, LCD_REINIT: 4, LCD_FAULT_TEST: 5, TIME_SYNC: 6, NEWS_REFRESH: 7 };
+const NEWS_SCENE = 8;
+const NEWS_CUSTOM = 255;
+const NEWS_URL_MAX = 119;
+// Same order as the preset table in src/news.cpp.
+const NEWS_PRESETS = [
+  "NHK ニュース 主要", "NHK 社会", "NHK 政治", "NHK 経済", "NHK 国際", "NHK スポーツ",
+  "NHK 科学・医療", "NHK 文化・エンタメ", "Yahoo!ニュース 主要", "Yahoo!ニュース IT", "BBC News World(英語)",
+];
 
 // esp_reset_reason_t values reported by the firmware (Status bytes 4..5).
 const RESET_REASONS = {
@@ -107,6 +118,16 @@ const SCENES = [
       range("波の高さ", 0.3, 1.5, 100),
     ],
   },
+  {
+    name: "News", ja: "ニュース(見出し)",
+    desc: "RSS から取得した見出しを日本語で 1 件ずつ表示します(文字送り → 表示 → スライド)。配信元と更新間隔は下の「ニュース」で選べます。",
+    params: [
+      range("1 件の表示時間", 3, 15, 85, { unit: " 秒", digits: 1 }),
+      range("文字の出る速さ", 10, 120, 80, { unit: " 字/秒", digits: 0 }),
+      toggle("ヘッダー(配信元・件数・何分前)を表示", 255),
+      toggle("ランダムな順番で表示", 0),
+    ],
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -120,6 +141,8 @@ const el = {
   paramTitle: $("paramTitle"), sceneDesc: $("sceneDesc"), params: $("params"),
   dropBtn: $("dropBtn"), resetBtn: $("resetBtn"), defaultsBtn: $("defaultsBtn"),
   reinitBtn: $("reinitBtn"), faultBtn: $("faultBtn"), syncBtn: $("syncBtn"), diagInfo: $("diagInfo"),
+  newsSource: $("newsSource"), newsUrl: $("newsUrl"), newsUrlRow: $("newsUrlRow"), newsInterval: $("newsInterval"),
+  newsApply: $("newsApply"), newsRefresh: $("newsRefresh"), newsInfo: $("newsInfo"),
   speed: $("speed"), speedOut: $("speedOut"),
   fClock: $("fClock"), fDepth: $("fDepth"), fName: $("fName"), fFps: $("fFps"),
   form: $("form"), applyBtn: $("applyBtn"),
@@ -136,6 +159,7 @@ const state = {
   active: -1,
   fps: 0,
   diag: null, // { reason, boots } from the Status characteristic
+  news: { source: 0, interval: 30, url: "", status: null }, // status: { state, count, age, error }
   cycle: 20,
   speed: 100,
   flags: 13,
@@ -329,6 +353,73 @@ function readDiag(dv) {
   if (dv.byteLength >= 6) { state.diag = { reason: dv.getUint8(4), boots: dv.getUint8(5) }; renderDiag(); }
 }
 
+// ---------------------------------------------------------------------------
+// News card
+// ---------------------------------------------------------------------------
+function newsErrorText(code) {
+  if (code & 0x8000) {
+    const c = code & 0x7fff; // HTTPClient/TLS error, sign flipped by the firmware
+    const names = { 1: "接続できません", 2: "送信に失敗", 3: "ヘッダーの送信に失敗", 4: "ステータスの受信に失敗",
+      5: "受信に失敗", 6: "接続が切れました", 7: "ストリームの書き込みに失敗", 8: "接続が切れました",
+      9: "接続が切れました", 10: "メモリ不足", 11: "応答がありません(タイムアウト)", 12: "応答が不正です" };
+    return (names[c] || "通信エラー") + "(-" + c + ")。証明書の検証失敗や圏外の可能性があります";
+  }
+  if (code === 1) return "URL を開始できません";
+  if (code === 2) return "見出しが見つかりません(RSS ではない/形式が違う)";
+  if (code === 3) return "取得タスクを開始できません";
+  return "HTTP " + code;
+}
+
+function renderNewsInfo() {
+  const s = state.news.status;
+  if (!s) { el.newsInfo.textContent = ""; return; }
+  const age = s.age === 0xffff ? "時刻不明" : s.age < 60 ? s.age + " 分前" : Math.floor(s.age / 60) + " 時間前";
+  const parts = ["まだ取得していません", "取得中…", "取得済み: " + s.count + " 件(" + age + ")", "取得に失敗: " + newsErrorText(s.error)];
+  el.newsInfo.textContent = parts[s.state] || "";
+  if (s.state === 3 && s.count > 0) el.newsInfo.textContent += " / 前回の " + s.count + " 件(" + age + ")を表示中";
+}
+
+function readNewsStatus(dv) {
+  if (dv.byteLength < 6) return;
+  state.news.status = {
+    state: dv.getUint8(0), count: dv.getUint8(1),
+    age: dv.getUint8(2) | (dv.getUint8(3) << 8), error: dv.getUint8(4) | (dv.getUint8(5) << 8),
+  };
+  renderNewsInfo();
+}
+
+function renderNewsControls() {
+  el.newsSource.value = String(state.news.source);
+  el.newsInterval.value = String(state.news.interval);
+  el.newsUrl.value = state.news.url;
+  el.newsUrlRow.hidden = state.news.source !== NEWS_CUSTOM;
+}
+
+const newsUrlOk = (u) => u.length <= NEWS_URL_MAX && /^https?:\/\/[\x21-\x7e]{3,}$/.test(u);
+
+async function applyNews() {
+  if (!state.chars) return;
+  const source = Number(el.newsSource.value);
+  const interval = Number(el.newsInterval.value);
+  const url = el.newsUrl.value.trim();
+  if (source === NEWS_CUSTOM && !newsUrlOk(url)) {
+    toast("URL は http:// か https:// で始まる半角文字(119 文字まで)で入力してください。", "err");
+    return;
+  }
+  el.newsApply.disabled = true;
+  try {
+    if (source === NEWS_CUSTOM) {
+      await gatt(() => state.chars.newsUrl.writeValueWithResponse(new TextEncoder().encode(url)));
+    }
+    await gatt(() => state.chars.newsCfg.writeValueWithResponse(new Uint8Array([source, interval])));
+    state.news.source = source; state.news.interval = interval;
+    if (source === NEWS_CUSTOM) state.news.url = url;
+    toast("ニュース設定を反映しました。まもなく取得します。", "ok");
+  } catch (err) {
+    toast("ニュース設定の書き込みに失敗: " + errText(err), "err");
+  } finally { el.newsApply.disabled = false; }
+}
+
 function renderLive() {
   const name = state.active >= 0 ? SCENES[state.active].name : "—";
   el.live.textContent = name + " · " + (state.fps || "—") + " fps";
@@ -464,22 +555,32 @@ async function readAll() {
   state.active = st.getUint8(1);
   state.fps = st.getUint8(2);
   readDiag(st);
+
+  const nc = await gatt(() => c.newsCfg.readValue());
+  state.news.source = nc.getUint8(0);
+  state.news.interval = nc.getUint8(1);
+  const nu = await gatt(() => c.newsUrl.readValue());
+  state.news.url = new TextDecoder("ascii").decode(nu);
+  readNewsStatus(await gatt(() => c.newsStatus.readValue()));
 }
 
 async function connectGatt() {
   const server = await state.device.gatt.connect();
   const service = await server.getPrimaryService(UUID.service);
-  const names = ["backlight", "display", "message", "scene", "params", "action", "status", "mirror"];
+  const names = ["backlight", "display", "message", "scene", "params", "action", "status", "mirror",
+    "newsCfg", "newsUrl", "newsStatus"];
   const list = await Promise.all(names.map((n) => service.getCharacteristic(UUID[n])));
   state.chars = Object.fromEntries(names.map((n, i) => [n, list[i]]));
 
   await readAll();
   state.chars.status.addEventListener("characteristicvaluechanged", onStatus);
   state.chars.mirror.addEventListener("characteristicvaluechanged", onMirror);
+  state.chars.newsStatus.addEventListener("characteristicvaluechanged", (ev) => readNewsStatus(ev.target.value));
   await gatt(() => state.chars.status.startNotifications());
+  await gatt(() => state.chars.newsStatus.startNotifications());
   if (el.mirrorOn.checked) await gatt(() => state.chars.mirror.startNotifications());
 
-  renderGlobals(); renderScenes(); renderParams(); renderLive();
+  renderGlobals(); renderScenes(); renderParams(); renderLive(); renderNewsControls(); renderNewsInfo();
   setConnected(true, state.device.name || "ESPmono-clock");
 }
 
@@ -556,6 +657,19 @@ function bindUi() {
   el.nextBtn.addEventListener("click", () => sendAction(ACTION.NEXT));
   el.dropBtn.addEventListener("click", () => sendAction(ACTION.DROP));
   el.resetBtn.addEventListener("click", () => sendAction(ACTION.RESET));
+  for (const [i, name] of NEWS_PRESETS.entries()) {
+    const o = document.createElement("option");
+    o.value = String(i);
+    o.textContent = name;
+    el.newsSource.append(o);
+  }
+  const custom = document.createElement("option");
+  custom.value = String(NEWS_CUSTOM);
+  custom.textContent = "任意の RSS(URL を入力)";
+  el.newsSource.append(custom);
+  el.newsSource.addEventListener("change", () => { el.newsUrlRow.hidden = Number(el.newsSource.value) !== NEWS_CUSTOM; });
+  el.newsApply.addEventListener("click", applyNews);
+  el.newsRefresh.addEventListener("click", () => { sendAction(ACTION.NEWS_REFRESH); toast("ニュースを更新します(数秒かかります)。", "ok"); });
   el.reinitBtn.addEventListener("click", () => { sendAction(ACTION.LCD_REINIT); toast("液晶を再初期化しました。", "ok"); });
   el.faultBtn.addEventListener("click", () => {
     sendAction(ACTION.LCD_FAULT_TEST);
@@ -605,6 +719,7 @@ renderScenes();
 renderParams();
 renderGlobals();
 renderLive();
+renderNewsControls();
 paintLcd();
 
 if (!("bluetooth" in navigator)) {
