@@ -16,6 +16,7 @@ const UUID = {
   newsCfg: "ae6b0009-d452-4478-9a9f-6030f75771a7",   // R/W [source, interval_min]
   newsUrl: "ae6b000a-d452-4478-9a9f-6030f75771a7",   // R/W custom RSS URL (ASCII)
   newsStatus: "ae6b000b-d452-4478-9a9f-6030f75771a7", // notify [state, count, age_min u16, error u16]
+  playlist: "ae6b000c-d452-4478-9a9f-6030f75771a7",  // R/W [count][count x (scene, seconds u16 LE, news_source, dwell_s, flags)]
 };
 const PROTO_VERSION = 2;
 const MESSAGE_MAX_LEN = 21;
@@ -23,6 +24,10 @@ const FLAG = { CLOCK: 1, FPS: 2, DEPTH: 4, NAME: 8 };
 const ACTION = { DROP: 1, RESET: 2, NEXT: 3, LCD_REINIT: 4, LCD_FAULT_TEST: 5, TIME_SYNC: 6, NEWS_REFRESH: 7 };
 const NEWS_SCENE = 8;
 const NEWS_CUSTOM = 255;
+const NEWS_DEFAULT_SRC = 254; // playlist entry: "use the default news source"
+const PLAYLIST_MAX = 16;
+const MAX_NEWS_FEEDS = 5;     // feeds the firmware keeps at the same time
+const PL_ALL = 1;             // flag: show every unread article once
 const NEWS_URL_MAX = 119;
 // Same order as the preset table in src/news.cpp.
 const NEWS_PRESETS = [
@@ -137,7 +142,9 @@ const $ = (id) => document.getElementById(id);
 const el = {
   unsupported: $("unsupported"), status: $("status"), connectBtn: $("connectBtn"),
   fields: $("fields"), live: $("live"), lcd: $("lcd"), mirrorOn: $("mirrorOn"),
-  sceneGrid: $("sceneGrid"), cycle: $("cycle"), nextBtn: $("nextBtn"),
+  sceneGrid: $("sceneGrid"), mode: $("mode"), modeHint: $("modeHint"), nextBtn: $("nextBtn"),
+  plRows: $("plRows"), plWarn: $("plWarn"), plDirty: $("plDirty"), plAdd: $("plAdd"), plSample: $("plSample"),
+  plReset: $("plReset"), plApply: $("plApply"),
   paramTitle: $("paramTitle"), sceneDesc: $("sceneDesc"), params: $("params"),
   dropBtn: $("dropBtn"), resetBtn: $("resetBtn"), defaultsBtn: $("defaultsBtn"),
   reinitBtn: $("reinitBtn"), faultBtn: $("faultBtn"), syncBtn: $("syncBtn"), diagInfo: $("diagInfo"),
@@ -160,7 +167,10 @@ const state = {
   fps: 0,
   diag: null, // { reason, boots } from the Status characteristic
   news: { source: 0, interval: 30, url: "", status: null }, // status: { state, count, age, error }
-  cycle: 20,
+  cycle: 20,            // 0 = pinned scene; non-zero = play the playlist
+  playlist: [],         // [{ scene, seconds, source, dwell, all }]
+  plDirty: false,       // edited here but not written to the device yet
+  entry: 255,           // playlist entry being played (from the status), 255 = none
   speed: 100,
   flags: 13,
   params: SCENES.map((s) => s.params.map((p) => p.def)), // per-scene cache (raw 0..255)
@@ -330,8 +340,200 @@ function renderParams() {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Playlist editor
+// ---------------------------------------------------------------------------
+const clampInt = (v, lo, hi) => Math.min(hi, Math.max(lo, Math.round(Number(v) || 0)));
+
+function defaultPlaylist() {
+  return SCENES.map((_, i) => ({ scene: i, seconds: 20, source: NEWS_DEFAULT_SRC, dwell: 0, all: false }));
+}
+
+// "News reading": NHK top -> Yahoo IT -> NHK science (all unread articles, 10 s each) -> Ripple.
+function samplePlaylist() {
+  const news = (source) => ({ scene: NEWS_SCENE, seconds: 900, source, dwell: 10, all: true });
+  return [news(0), news(9), news(6), { scene: 7, seconds: 60, source: NEWS_DEFAULT_SRC, dwell: 0, all: false }];
+}
+
+function serializePlaylist(list) {
+  const b = [list.length];
+  for (const e of list) {
+    const isNews = e.scene === NEWS_SCENE;
+    const sec = isNews && e.all ? 900 : clampInt(e.seconds, 5, 3600);
+    b.push(e.scene, sec & 255, sec >> 8, isNews ? e.source : NEWS_DEFAULT_SRC, isNews ? clampInt(e.dwell, 0, 120) : 0,
+      isNews && e.all ? PL_ALL : 0);
+  }
+  return new Uint8Array(b);
+}
+
+function parsePlaylist(dv) {
+  const n = Math.min(dv.getUint8(0), PLAYLIST_MAX);
+  const list = [];
+  for (let i = 0; i < n && 1 + (i + 1) * 6 <= dv.byteLength; i++) {
+    const o = 1 + i * 6;
+    list.push({
+      scene: Math.min(dv.getUint8(o), SCENES.length - 1),
+      seconds: dv.getUint8(o + 1) | (dv.getUint8(o + 2) << 8),
+      source: dv.getUint8(o + 3), dwell: dv.getUint8(o + 4), all: (dv.getUint8(o + 5) & PL_ALL) !== 0,
+    });
+  }
+  return list;
+}
+
+const sceneLabel = (i) => SCENES[i].name + "(" + SCENES[i].ja + ")";
+
+function plMarkDirty() {
+  state.plDirty = true;
+  el.plDirty.hidden = false;
+  updatePlaylistHighlight();
+  updatePlaylistWarning();
+}
+
+// Which news feeds does the firmware have to fetch for this list (the default feed is always kept)?
+function feedsInUse() {
+  const set = new Set([state.news.source]);
+  for (const e of state.playlist) {
+    if (e.scene === NEWS_SCENE) set.add(e.source === NEWS_DEFAULT_SRC ? state.news.source : e.source);
+  }
+  return set;
+}
+
+function updatePlaylistWarning() {
+  const n = feedsInUse().size;
+  el.plWarn.hidden = n <= MAX_NEWS_FEEDS;
+  el.plWarn.textContent = "ニュースの配信元が " + n + " 種類あります。同時に保持できるのは " + MAX_NEWS_FEEDS +
+    " 種類までなので、超えた分は取得されません。";
+}
+
+function updatePlaylistHighlight() {
+  [...el.plRows.children].forEach((row, i) => {
+    const cur = !state.plDirty && state.cycle !== 0 && i === state.entry;
+    row.classList.toggle("current", cur);
+    const now = row.querySelector(".now");
+    if (now) now.hidden = !cur;
+  });
+}
+
+function movePlaylist(i, d) {
+  const j = i + d;
+  if (j < 0 || j >= state.playlist.length) return;
+  [state.playlist[i], state.playlist[j]] = [state.playlist[j], state.playlist[i]];
+  plMarkDirty();
+  renderPlaylist();
+}
+
+function renderPlaylist() {
+  el.plRows.textContent = "";
+  state.playlist.forEach((e, i) => {
+    const isNews = e.scene === NEWS_SCENE;
+    const row = document.createElement("div");
+    row.className = "pl-row";
+
+    const head = document.createElement("div");
+    head.className = "pl-head";
+    const idx = document.createElement("span");
+    idx.className = "idx";
+    idx.textContent = String(i + 1);
+    const now = document.createElement("span");
+    now.className = "now";
+    now.textContent = "▶ 再生中";
+    now.hidden = true;
+    const sp = document.createElement("span");
+    sp.className = "sp";
+    head.append(idx, now, sp);
+    const btn = (label, title, fn, disabled) => {
+      const b = document.createElement("button");
+      b.type = "button"; b.textContent = label; b.title = title; b.setAttribute("aria-label", title);
+      b.disabled = !!disabled;
+      b.addEventListener("click", fn);
+      return b;
+    };
+    head.append(
+      btn("↑", "上へ", () => movePlaylist(i, -1), i === 0),
+      btn("↓", "下へ", () => movePlaylist(i, 1), i === state.playlist.length - 1),
+      btn("✕", "削除", () => { state.playlist.splice(i, 1); plMarkDirty(); renderPlaylist(); }),
+    );
+
+    const fields = document.createElement("div");
+    fields.className = "pl-fields";
+    const field = (labelText, control, full) => {
+      const l = document.createElement("label");
+      if (full) l.className = "full";
+      l.append(labelText, control);
+      fields.append(l);
+    };
+
+    const sceneSel = document.createElement("select");
+    SCENES.forEach((_, k) => {
+      const o = document.createElement("option");
+      o.value = String(k); o.textContent = sceneLabel(k);
+      sceneSel.append(o);
+    });
+    sceneSel.value = String(e.scene);
+    sceneSel.addEventListener("change", () => { e.scene = Number(sceneSel.value); plMarkDirty(); renderPlaylist(); });
+    field("シーン", sceneSel, true);
+
+    const num = (value, lo, hi, onInput) => {
+      const n = document.createElement("input");
+      n.type = "number"; n.min = String(lo); n.max = String(hi); n.step = "1"; n.inputMode = "numeric";
+      n.value = String(value);
+      n.addEventListener("input", () => { onInput(clampInt(n.value, lo, hi)); plMarkDirty(); });
+      return n;
+    };
+
+    if (isNews) {
+      const src = document.createElement("select");
+      const add = (v, t) => { const o = document.createElement("option"); o.value = String(v); o.textContent = t; src.append(o); };
+      add(NEWS_DEFAULT_SRC, "既定の配信元(「ニュース」で設定)");
+      NEWS_PRESETS.forEach((t, k) => add(k, t));
+      add(NEWS_CUSTOM, "任意の RSS(「ニュース」で入力した URL)");
+      src.value = String(e.source);
+      src.addEventListener("change", () => { e.source = Number(src.value); plMarkDirty(); });
+      field("配信元", src, true);
+
+      const modeSel = document.createElement("select");
+      for (const [v, t] of [["all", "全記事(未読を全部)"], ["time", "時間を指定"]]) {
+        const o = document.createElement("option"); o.value = v; o.textContent = t; modeSel.append(o);
+      }
+      modeSel.value = e.all ? "all" : "time";
+      modeSel.addEventListener("change", () => { e.all = modeSel.value === "all"; plMarkDirty(); renderPlaylist(); });
+      field("表示の長さ", modeSel);
+      field("1 記事あたり(秒、0=ニュースの設定)", num(e.dwell, 0, 120, (v) => { e.dwell = v; }));
+      if (!e.all) field("このエントリの合計(秒)", num(e.seconds, 5, 3600, (v) => { e.seconds = v; }));
+    } else {
+      field("表示する秒数", num(e.seconds, 5, 3600, (v) => { e.seconds = v; }));
+    }
+
+    row.append(head, fields);
+    el.plRows.append(row);
+  });
+  el.plAdd.disabled = state.playlist.length >= PLAYLIST_MAX;
+  el.plDirty.hidden = !state.plDirty;
+  updatePlaylistWarning();
+  updatePlaylistHighlight();
+}
+
+async function applyPlaylist() {
+  if (!state.chars) return;
+  if (state.playlist.length === 0) { toast("プレイリストが空です。1 件以上追加してください。", "err"); return; }
+  el.plApply.disabled = true;
+  try {
+    await gatt(() => state.chars.playlist.writeValueWithResponse(serializePlaylist(state.playlist)));
+    state.plDirty = false;
+    el.plDirty.hidden = true;
+    if (state.cycle === 0) { state.cycle = 20; sendScene(); renderGlobals(); } // writing a playlist implies "play it"
+    toast("プレイリストを反映しました(最初から再生します)。", "ok");
+    updatePlaylistHighlight();
+  } catch (err) {
+    toast("プレイリストの書き込みに失敗: " + errText(err), "err");
+  } finally { el.plApply.disabled = false; }
+}
+
 function renderGlobals() {
-  el.cycle.value = [0, 5, 10, 20, 30, 60, 120].includes(state.cycle) ? String(state.cycle) : "20";
+  el.mode.value = state.cycle === 0 ? "fixed" : "playlist";
+  el.modeHint.textContent = state.cycle === 0
+    ? "上で選んだシーンを表示し続けます(「プレイリスト」は使いません)。"
+    : "「プレイリスト」の順に自動で切り替えます。";
   el.speed.value = state.speed;
   el.speedOut.textContent = state.speed;
   el.fClock.checked = !!(state.flags & FLAG.CLOCK);
@@ -513,9 +715,11 @@ function onStatus(ev) {
   if (dv.getUint8(0) !== PROTO_VERSION) toast("ファームウェアの通信バージョンが異なります。", "err");
   state.active = dv.getUint8(1);
   state.fps = dv.getUint8(2);
+  state.entry = dv.byteLength >= 7 ? dv.getUint8(6) : 255;
   readDiag(dv);
   renderLive();
   renderScenes();
+  updatePlaylistHighlight();
 }
 
 // ---------------------------------------------------------------------------
@@ -562,13 +766,17 @@ async function readAll() {
   const nu = await gatt(() => c.newsUrl.readValue());
   state.news.url = new TextDecoder("ascii").decode(nu);
   readNewsStatus(await gatt(() => c.newsStatus.readValue()));
+  state.entry = st.byteLength >= 7 ? st.getUint8(6) : 255;
+  const pl = await gatt(() => c.playlist.readValue());
+  if (pl.byteLength >= 1) state.playlist = parsePlaylist(pl);
+  state.plDirty = false;
 }
 
 async function connectGatt() {
   const server = await state.device.gatt.connect();
   const service = await server.getPrimaryService(UUID.service);
   const names = ["backlight", "display", "message", "scene", "params", "action", "status", "mirror",
-    "newsCfg", "newsUrl", "newsStatus"];
+    "newsCfg", "newsUrl", "newsStatus", "playlist"];
   const list = await Promise.all(names.map((n) => service.getCharacteristic(UUID[n])));
   state.chars = Object.fromEntries(names.map((n, i) => [n, list[i]]));
 
@@ -580,7 +788,7 @@ async function connectGatt() {
   await gatt(() => state.chars.newsStatus.startNotifications());
   if (el.mirrorOn.checked) await gatt(() => state.chars.mirror.startNotifications());
 
-  renderGlobals(); renderScenes(); renderParams(); renderLive(); renderNewsControls(); renderNewsInfo();
+  renderGlobals(); renderScenes(); renderParams(); renderLive(); renderNewsControls(); renderNewsInfo(); renderPlaylist();
   setConnected(true, state.device.name || "ESPmono-clock");
 }
 
@@ -646,7 +854,21 @@ function bindUi() {
   });
   sync();
 
-  el.cycle.addEventListener("change", () => { state.cycle = Number(el.cycle.value); sendScene(); });
+  el.mode.addEventListener("change", () => {
+    state.cycle = el.mode.value === "fixed" ? 0 : 20;  // any non-zero value means "play the playlist"
+    sendScene();
+    renderGlobals();
+    updatePlaylistHighlight();
+  });
+  el.plAdd.addEventListener("click", () => {
+    if (state.playlist.length >= PLAYLIST_MAX) return;
+    state.playlist.push({ scene: 1, seconds: 20, source: NEWS_DEFAULT_SRC, dwell: 0, all: false });
+    plMarkDirty();
+    renderPlaylist();
+  });
+  el.plSample.addEventListener("click", () => { state.playlist = samplePlaylist(); plMarkDirty(); renderPlaylist(); });
+  el.plReset.addEventListener("click", () => { state.playlist = defaultPlaylist(); plMarkDirty(); renderPlaylist(); });
+  el.plApply.addEventListener("click", applyPlaylist);
   el.speed.addEventListener("input", () => { state.speed = Number(el.speed.value); el.speedOut.textContent = state.speed; sendScene(); });
   const flag = (box, bit) => box.addEventListener("change", () => {
     state.flags = box.checked ? state.flags | bit : state.flags & ~bit;
@@ -720,6 +942,8 @@ renderParams();
 renderGlobals();
 renderLive();
 renderNewsControls();
+state.playlist = defaultPlaylist();
+renderPlaylist();
 paintLcd();
 
 if (!("bluetooth" in navigator)) {

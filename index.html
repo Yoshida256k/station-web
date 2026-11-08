@@ -53,21 +53,34 @@
       <h2>シーン</h2>
       <div id="sceneGrid" class="scene-grid" role="radiogroup" aria-label="シーン"></div>
       <div class="pair">
-        <label>自動で切り替える間隔
-          <select id="cycle">
-            <option value="0">固定(切り替えない)</option>
-            <option value="5">5 秒</option>
-            <option value="10">10 秒</option>
-            <option value="20">20 秒</option>
-            <option value="30">30 秒</option>
-            <option value="60">60 秒</option>
-            <option value="120">120 秒</option>
+        <label>再生モード
+          <select id="mode">
+            <option value="playlist">プレイリストを順に再生</option>
+            <option value="fixed">固定(選んだシーンだけ)</option>
           </select>
         </label>
         <div class="buttons">
-          <button type="button" id="nextBtn">次のシーン ▶</button>
+          <button type="button" id="nextBtn">次へ ▶</button>
         </div>
       </div>
+      <p class="hint" id="modeHint"></p>
+    </section>
+
+    <section class="card" id="playlistCard">
+      <h2>プレイリスト</h2>
+      <p class="hint">上から順に再生し、最後まで行ったら最初に戻ります。同じシーンを何度入れてもかまいません(最大 16 件)。
+        ニュースは配信元を選んで「全記事」にすると、未読の記事を 1 件ずつ全部読みます。時間切れで読みきれなかった分は、次に回ってきたときに続きから表示されます。</p>
+      <div id="plRows"></div>
+      <p id="plWarn" class="hint warn" hidden></p>
+      <div class="buttons">
+        <button type="button" id="plAdd">＋ 追加</button>
+        <button type="button" id="plSample">サンプル: ニュース読書</button>
+        <button type="button" id="plReset">既定に戻す</button>
+      </div>
+      <div class="buttons">
+        <button type="button" id="plApply" class="primary">プレイリストを反映</button>
+      </div>
+      <p id="plDirty" class="hint" hidden>未反映の変更があります。「プレイリストを反映」を押すと再生が最初からやり直しになります。</p>
     </section>
 
     <section class="card">

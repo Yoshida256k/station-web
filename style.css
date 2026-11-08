@@ -150,3 +150,31 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .toast.ok { color: var(--ok); }
 footer { margin-top: 8px; color: var(--muted); font-size: 0.8rem; }
 [hidden] { display: none !important; }
+
+/* playlist editor */
+.pl-row {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px;
+  margin-bottom: 8px;
+}
+.pl-row.current { border-color: var(--accent); background: var(--accent-soft); }
+.pl-head { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+.pl-head .idx { font-weight: 700; min-width: 1.6em; }
+.pl-head .now { color: var(--ok); font-size: 0.72rem; font-weight: 700; }
+.pl-head .sp { flex: 1; }
+.pl-head button { min-height: 36px; min-width: 40px; padding: 0 10px; }
+.pl-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.pl-fields .full { grid-column: 1 / -1; }
+.pl-fields label { font-size: 0.82rem; color: var(--muted); }
+.pl-fields select, .pl-fields input { margin-top: 2px; color: var(--text); }
+input[type="number"], input[type="url"] {
+  width: 100%;
+  padding: 10px 12px;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.hint.warn { color: var(--err); }
